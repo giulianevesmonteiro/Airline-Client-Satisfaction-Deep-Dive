@@ -532,3 +532,185 @@ ggplot(importance, aes(x = reorder(Variable, Importance), y = Importance)) +
   labs(title = "Variable Importance", x = "Variables", y = "Importance") +
   theme_minimal()
 ```
+
+#### Random Forest
+```{r}
+library(randomForest)
+library(rpart) # Load rpart for decision trees
+library(caret) # Used for analysing results
+```
+
+Replace NA's: 
+```{r}
+colSums(is.na(train_data))
+train_data[is.na(train_data)] <- 0
+# so randomforest can automatically treat it as a classification target 
+train_data$satisfaction <- factor(train_data$satisfaction, levels = c("neutral or dissatisfied", "satisfied"))
+```
+
+
+Single classification tree: 
+```{r}
+tree_model <- rpart(satisfaction ~., # Set tree formula
+                data = train_data)
+
+# Predict with classification tree
+tree_preds <- predict(tree_model, test_data, type = "class")
+```
+
+To analyze results from the model --> confusion matrix 
+
+```{r}
+# Confusion matrix for single tree
+t <- table(tree_preds,test_data$satisfaction) # Create table
+confusionMatrix(t, positive = "satisfied")
+```
+Accuracy measure of 0.8838 for this inital classification tree - not bad but we will try to improve. 
+
+
+Trying bagging: set mtry to the number of variables in the dataset 
+
+```{r}
+set.seed(258506) # Set random number generator seed for reproducability
+
+
+# Use random forest to do bagging
+bag_mod <- randomForest(satisfaction ~., # Set tree formula
+                data = train_data, # Set dataset
+                mtry = 24, # Set mtry to number of variables 
+                ntree = 200, do.trace = TRUE) # Set number of trees to use
+bag_mod
+```
+
+```{r}
+bag_preds <- predict(bag_mod, test_data) # Create predictions for bagging model
+
+t <- table(bag_preds,test_data$satisfaction) # Create table
+confusionMatrix(t,  positive = "satisfied")
+```
+This increased our accuracy to: 0.9628 
+
+By using bagging we achieved a test set error rate of 0.9628 compared to 0.8838  for our classification tree. The difference is substaintial compared to the single tree model. 
+
+
+Can check our out-of-bag error for the trees as each one is built and then plot them to analyze if the model has already converged to our optimal solution or if it is still converging. 
+
+```{r}
+oob_error <- bag_mod$err.rate[,1] # Extract oob error
+plot_dat <- cbind.data.frame(rep(1:length(oob_error)), oob_error) # Create plot data
+names(plot_dat) <- c("trees", "oob_error")
+
+
+# Plot oob error
+g_1 <- ggplot(plot_dat, aes(x = trees, y = oob_error)) + # Set x as trees and y as error
+  geom_point(alpha = 0.5, color = "blue") + # Select geom point
+  geom_smooth() + # Add smoothing line
+  theme_bw() + # Set theme
+  theme(panel.grid.major = element_blank(), # Remove grid
+        panel.grid.minor = element_blank(), # Remove grid
+        panel.border = element_blank(), # Remove grid
+        panel.background = element_blank()) + # Remove grid 
+  labs(x = "Number of Trees", title = "Error Rate v Number of Trees",
+       y = "Error Rate")  # Set labels
+g_1 # Print plot
+```
+From this plot we can see that as the number of trees increases the error rate continually falls. However once about 150 trees were created it appears that the error rate essentially plateaued even as the number of trees iterated up to 200. Therefore we can start looking at parameter tuning of this model (we can tune the number of trees and node size).
+
+Takes a long time to run but would tune the parameters: 
+```{r}
+trees <- c(10, 25, 50, 100, 200, 500, 1000) # Create vector of possible tree sizes
+nodesize <- c(1, 10, 25, 50, 100, 200, 500, 1000) # Create vector of possible node sizes
+
+params <- expand.grid(trees, nodesize) # Expand grid to get data frame of parameter combinations
+names(params) <- c("trees", "nodesize") # Name parameter data frame
+res_vec <- rep(NA, nrow(params)) # Create vector to store accuracy results
+
+for(i in 1:nrow(params)){ # For each set of parameters
+  set.seed(987654) # Set seed for reproducability
+  mod <- randomForest(satisfaction ~. , # Set formula
+                      data=train_data,# Set data
+                      mtry = 24, # Set number of variables
+                      importance = FALSE,  # 
+                      ntree = params$trees[i], # Set number of trees
+                      nodesize = params$nodesize[i]) # Set node size
+  res_vec[i] <- 1 - mod$err.rate[nrow(mod$err.rate),1] }
+```
+
+Now we put the results of that for loop into a dataframe that we can later use for a visualization analysis:
+
+```{r}
+res_db <- cbind.data.frame(params, res_vec) # Join parameters and accuracy results
+names(res_db)[3] <- "oob_accuracy" # Name accuracy results column
+res_db # gives us accuracy of results which can also be visualized in the heatmap below
+```
+
+
+Visualization of the results from above: 
+
+```{r}
+res_db$trees <- as.factor(res_db$trees) # Convert tree number to factor for plotting
+res_db$nodesize <- as.factor(res_db$nodesize) # Convert node size to factor for plotting
+g_2 <- ggplot(res_db, aes(y = trees, x = nodesize, fill = oob_accuracy)) + # set aesthetics
+  geom_tile() + # Use geom_tile for heatmap
+  theme_bw() + # Set theme
+  scale_fill_gradient2(low = "blue", # Choose low color
+    mid = "white", # Choose mid color
+    high = "red", # Choose high color
+    midpoint =mean(res_db$oob_accuracy), # Choose mid point
+    space = "Lab", 
+    na.value ="grey", # Choose NA value
+    guide = "colourbar", # Set color bar
+    aesthetics = "fill") + # Select aesthetics to apply
+  labs(x = "Node Size", y = "Number of Trees", fill = "OOB Accuracy") # Set labels
+g_2
+```
+
+
+View the best test results:
+
+```{r}
+res_db[which.max(res_db$oob_accuracy),]
+```
+Based on the visualization results we can see that the recommended number of trees in 1000 with node size of 1. This combination has a predicted accuracy of 0.96343, which is comparable to our previous 0.9628  accuracy score. However since we took the time to produce these parameters let's run a model using them: 
+
+```{r}
+set.seed(258506)
+bag_mod1 <- randomForest(satisfaction ~., # Set tree formula
+                data = train_data, # Set dataset
+                mtry = 24, # Set mtry to number of variables 
+                ntree = 1000, do.trace = TRUE,
+                nodesize= 1) # Set number of trees to use
+bag_mod1
+```
+
+```{r}
+bag_preds <- predict(bag_mod1, test_data) # Create predictions for bagging model
+
+t <- table(bag_preds,test_data$satisfaction) # Create table
+confusionMatrix(t,  positive = "satisfied")
+```
+
+```{r}
+# Extract Importance
+importance_matrix <- randomForest::importance(bag_mod1)
+# Print importance matrix
+importance_matrix
+```
+
+```{r}
+varImpPlot(bag_mod1, type =2, n.var = 10) # Plot importance
+```
+
+```{r}
+partialPlot(bag_mod1 , train_data, x.var = "Online.boarding", which.class = "satisfied") # Generate partial dependency plot for difference in significant strikes
+```
+
+```{r}
+partialPlot(bag_mod1 , train_data, x.var = "Inflight.wifi.service", which.class = "satisfied")
+```
+
+We can see that the `Inflight.wifi.service` variable is either reported as 0 or 1, or 4 or 5, with very few ratings in between. Considering wifi is an amenity that either works well or not at all, this polarization in ratings makes perfect sense. 
+
+```{r}
+partialPlot(bag_mod1 , train_data, x.var = "Seat.comfort", which.class = "satisfied")
+```
